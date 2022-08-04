@@ -74,6 +74,8 @@ class ThorCamWrapper(ThorCam):
             nextFrame = self._imqueue.pop(True)
 
             if not nextFrame:
+                if self._terminateProcessThread:
+                    break
                 continue
 
             self._logger.debug("Processing next frame on background thread")
@@ -83,13 +85,22 @@ class ThorCamWrapper(ThorCam):
             newImage = self._convert_image_to_PIL(nextFrame['image'])
 
             # Now either store to file or pass into waiting / name queue ...
-            newImage.convert('RGB').save(f"c:\\temp\\image{nextFrame['count']}.png")
-
+            destFName = nextFrame['targetpath'] + nextFrame['filenameprefix'] + str(nextFrame['count']) + nextFrame['filenamesuffix']
+            newImage.convert('RGB').save(destFName)
 
             etime = time.time() * 1000
-            self._logger.debug(f"Processed frame in {etime - stime} milliseconds")
+            self._logger.debug(f"Processed frame (t={nextFrame['t']}) in {etime - stime} milliseconds")
+
+            # ToDo: If required SCP the frame somewhere ...
+
+        self._logger.debug("Terminating processing thread")
 
     def shutdown(self):
+        if self._processThread:
+            self._logger.debug("Requesting shutdown of processing thread")
+            self._terminateProcessThread = True
+            self._processThread.join()
+            self._processThread = None
         if self.cam_open:
             self._logger.debug("Closing ThorCam")
             self.close_camera()
@@ -183,11 +194,27 @@ class ThorCamWrapper(ThorCam):
     def got_image(self, image, count, queued_count, t):
         self._logger.debug("Received image (count: {}, queued count: {})".format(image, count, queued_count))
         #self._write_image_to_file(image, f"c:\\temp\\image{count}.png")
-        self._imqueue.push({
+        newEntry = {
             'image' : image,
             'count' : count,
-            't' : t
-        })
+            't' : t,
+            'filenamesuffix' : '.png',
+            'targetpath' : "c:\\temp\\"
+        }
+        if self._bridge:
+            if self._bridge._filenameCurrentRunPrefix is not None:
+                newEntry['filenameprefix'] = self._bridge._filenameCurrentRunPrefix
+            else:
+                newEntry['filenameprefix'] = self._bridge._filenameDefaultPrefix + datetime.datetime.now().strftime("%d_%m_%Y_%H_%M_%S_")
+        else:
+            newEntry['filenameprefix'] = "image"
+
+        # We build our base filename (that's then simply counted upwards from)
+        # by using a generic (optional) prefix+timestamp OR the run prefix depending
+        # on the current state of the class ... the current run prefix can be
+        # set via MQTT message (for example after taking the previous pictures)
+
+        self._imqueue.push(newEntry)
 
     def _convert_image_to_PIL(self, image):
         data = image.to_bytearray()[0]
@@ -300,6 +327,9 @@ class ThorBridge:
         self._evtMQTTTerminated = threading.Event()
 
         self._mqttHandlers = None
+
+        self._filenameDefaultPrefix = ""
+        self._filenameCurrentRunPrefix = None
 
     def _readConfigFile(self):
         cfgPath = os.path.join(Path.home(), ".config/thorbridge/bridge.conf")
