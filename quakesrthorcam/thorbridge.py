@@ -13,6 +13,35 @@ import numpy as np
 import os
 from pathlib import Path
 
+class ThreadSafeQueue:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.queue = []
+        self._evt = threading.Event()
+
+    def push(self, newItem):
+        with self._lock:
+            self.queue.append(newItem)
+        self._evt.set()
+
+    def pop(self, blocking = False, timeout = 5):
+        res = None
+
+        with self._lock:
+            if len(self.queue) > 0:
+                res = self.queue.pop(0)
+
+        if (res is None) and blocking:
+            while not self._evt.is_set():
+                self._evt.wait(timeout)
+
+            # Try after our thread has been released
+            with self._lock:
+                if len(self.queue) > 0:
+                    res = self.queue.pop(0)
+
+        return res
+
 
 class ThorCamWrapper(ThorCam):
     def __init__(self, bridge = None):
@@ -26,11 +55,39 @@ class ThorCamWrapper(ThorCam):
             self._logger.addHandler(logging.StreamHandler())
             self._logger.setLevel(logging.DEBUG)
 
+        self._imqueue = ThreadSafeQueue()
+
+        self._processThread = threading.Thread(target = self._processingThread)
+        self._processThread.start()
+
         self.state = 0
         self._logger.debug("Starting ThorCam process")
         self.start_cam_process()
         time.sleep(5)
         self.state = 1
+
+    def _processingThread(self):
+        # Just wait for new images being pushed into the queue (or we are getting terminated)
+        while True:
+            # ToDo: Check if we should terminate ourself ...
+
+            nextFrame = self._imqueue.pop(True)
+
+            if not nextFrame:
+                continue
+
+            self._logger.debug("Processing next frame on background thread")
+            stime = time.time() * 1000
+
+            # Do frame processing
+            newImage = self._convert_image_to_PIL(nextFrame['image'])
+
+            # Now either store to file or pass into waiting / name queue ...
+            newImage.convert('RGB').save(f"c:\\temp\\image{nextFrame['count']}.png")
+
+
+            etime = time.time() * 1000
+            self._logger.debug(f"Processed frame in {etime - stime} milliseconds")
 
     def shutdown(self):
         if self.cam_open:
@@ -125,7 +182,26 @@ class ThorCamWrapper(ThorCam):
 
     def got_image(self, image, count, queued_count, t):
         self._logger.debug("Received image (count: {}, queued count: {})".format(image, count, queued_count))
-        self._write_image_to_file(image, f"c:\\temp\\image{count}.png")
+        #self._write_image_to_file(image, f"c:\\temp\\image{count}.png")
+        self._imqueue.push({
+            'image' : image,
+            'count' : count,
+            't' : t
+        })
+
+    def _convert_image_to_PIL(self, image):
+        data = image.to_bytearray()[0]
+
+        # Pretty inefficient reshape
+        newIm = []
+        for i in range(int(len(data) / 2)):
+            if (i % image.get_size()[0]) == 0:
+                newIm.append([])
+            pxVal = float(int(data[i*2]) * 256 + int(data[i*2+1])) / 65535.0 * 255.0
+            newIm[len(newIm)-1].append(pxVal)
+
+        image = Image.fromarray(np.asarray(newIm, dtype = np.float32), mode='F')
+        return image
 
     def _write_image_to_file(self, image, filename):
         print(image.get_size())
