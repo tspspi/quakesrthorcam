@@ -8,6 +8,7 @@ import logging
 import time
 import threading
 import datetime
+import numpy as np
 
 import os
 from pathlib import Path
@@ -127,12 +128,22 @@ class ThorCamWrapper(ThorCam):
         self._write_image_to_file(image, f"c:\\temp\\image{count}.png")
 
     def _write_image_to_file(self, image, filename):
+        print(image.get_size())
         data = image.to_bytearray()[0]
-        image = Image.frombytes("I;16", image.get_size(), bytes(data))
+
+        # Pretty inefficient reshape
+        newIm = []
+        for i in range(int(len(data) / 2)):
+            if (i % image.get_size()[0]) == 0:
+                newIm.append([])
+            pxVal = float(int(data[i*2]) * 256 + int(data[i*2+1])) / 65535.0 * 255.0
+            newIm[len(newIm)-1].append(pxVal)
+
+        #image = Image.frombytes("I;16B", image.get_size(), bytes(data))
+        image = Image.fromarray(np.asarray(newIm, dtype = np.float32), mode='F')
+
         self._logger.info(f"Storing image {filename} to disk")
-        image.save(filename)
-        with open(filename+".bindump", "w") as f:
-            f.write(str(bytes(data)))
+        image.convert('RGB').save(filename)
 
     def setTrigger(self, hardware = False, frames = 1):
         if hardware and ("HW Trigger" not in self.supported_triggers):
