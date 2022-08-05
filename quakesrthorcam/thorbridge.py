@@ -14,7 +14,8 @@ import os
 from pathlib import Path
 
 class ThreadSafeQueue:
-    def __init__(self):
+    def __init__(self, logger = None):
+        self._logger = logger
         self._lock = threading.Lock()
         self.queue = []
         self._evt = threading.Event()
@@ -22,9 +23,11 @@ class ThreadSafeQueue:
     def push(self, newItem):
         with self._lock:
             self.queue.append(newItem)
+            if self._logger:
+                self._logger.debug(f"QUEUED-NEW: {len(self.queue)}")
         self._evt.set()
 
-    def pop(self, blocking = False, timeout = 5):
+    def pop(self, blocking = False, timeout = 0.1):
         res = None
 
         with self._lock:
@@ -44,7 +47,10 @@ class ThreadSafeQueue:
 
 
 class ThorCamWrapper(ThorCam):
-    def __init__(self, bridge = None):
+    def __init__(self, bridge = None, nThreadsFrameProcessing = 2):
+        if nThreadsFrameProcessing <= 0:
+            raise ValueError("At least one processing thread is required")
+
         self._serials = []
         if bridge is not None:
             self._logger = bridge._logger
@@ -55,10 +61,16 @@ class ThorCamWrapper(ThorCam):
             self._logger.addHandler(logging.StreamHandler())
             self._logger.setLevel(logging.DEBUG)
 
-        self._imqueue = ThreadSafeQueue()
+        self._imqueue = ThreadSafeQueue(self._logger)
+        self._nThreadsFrameProcessing = nThreadsFrameProcessing
+        self._threadsFrameProcessing = []
+        self._terminateProcessThread = []
 
-        self._processThread = threading.Thread(target = self._processingThread)
-        self._processThread.start()
+        for ithr in range(nThreadsFrameProcessing):
+            self._logger.debug(f"Launching processing thread {ithr}")
+            self._terminateProcessThread.append(False)
+            self._threadsFrameProcessing.append(threading.Thread(target = self._processingThread, args = (ithr,)))
+            self._threadsFrameProcessing[len(self._threadsFrameProcessing)-1].start()
 
         self.state = 0
         self._logger.debug("Starting ThorCam process")
@@ -66,7 +78,7 @@ class ThorCamWrapper(ThorCam):
         time.sleep(5)
         self.state = 1
 
-    def _processingThread(self):
+    def _processingThread(self, iThr):
         # Just wait for new images being pushed into the queue (or we are getting terminated)
         while True:
             # ToDo: Check if we should terminate ourself ...
@@ -74,36 +86,44 @@ class ThorCamWrapper(ThorCam):
             nextFrame = self._imqueue.pop(True)
 
             if not nextFrame:
-                if self._terminateProcessThread:
+                if self._terminateProcessThread[iThr]:
                     break
                 continue
 
-            self._logger.debug("Processing next frame on background thread")
+            self._logger.debug(f"Processing next frame on background thread {iThr}")
             stime = time.time() * 1000
 
             # Do frame processing
             newImage = self._convert_image_to_PIL(nextFrame['image'])
 
             # Now either store to file or pass into waiting / name queue ...
-            destFName = nextFrame['targetpath'] + nextFrame['filenameprefix'] + str(nextFrame['count']) + nextFrame['filenamesuffix']
+            if "filenamecurrentrunsuffix" in nextFrame:
+                destFName = nextFrame['targetpath'] + nextFrame['filenameprefix'] + "_" + str(nextFrame['filenamecurrentrunsuffix']) + nextFrame['filenamesuffix']
+            else:
+                destFName = nextFrame['targetpath'] + nextFrame['filenameprefix'] + str(nextFrame['count']) + nextFrame['filenamesuffix']
+
             newImage.convert('RGB').save(destFName)
 
             etime = time.time() * 1000
-            self._logger.debug(f"Processed frame (t={nextFrame['t']}) in {etime - stime} milliseconds")
+            self._logger.debug(f"Processed frame on thread {iThr} (t={nextFrame['t']}) in {etime - stime} milliseconds")
 
             # ToDo: If required SCP the frame somewhere ...
 
         self._logger.debug("Terminating processing thread")
 
     def shutdown(self):
-        if self._processThread:
-            self._logger.debug("Requesting shutdown of processing thread")
-            self._terminateProcessThread = True
-            self._processThread.join()
-            self._processThread = None
+        self._logger.debug("Waiting for shutdown of processing threads")
+        for i in range(len(self._threadsFrameProcessing)):
+            self._terminateProcessThread[i] = True
+        for i in range(len(self._threadsFrameProcessing)):
+            self._threadsFrameProcessing[i].join()
+            self._logger.debug(f"Thread {i} terminated and joined")
+            self._threadsFrameProcessing[i] = 0
+
         if self.cam_open:
             self._logger.debug("Closing ThorCam")
             self.close_camera()
+
         if self.process_connected:
             self._logger.debug("Shutting down ThorCam process")
             self.stop_cam_process(join = True, kill_delay = 30)
@@ -198,7 +218,7 @@ class ThorCamWrapper(ThorCam):
             'image' : image,
             'count' : count,
             't' : t,
-            'filenamesuffix' : '.png',
+            'filenamesuffix' : '.tiff',
             'targetpath' : "c:\\temp\\"
         }
         if self._bridge:
@@ -206,6 +226,8 @@ class ThorCamWrapper(ThorCam):
                 newEntry['filenameprefix'] = self._bridge._filenameCurrentRunPrefix
             else:
                 newEntry['filenameprefix'] = self._bridge._filenameDefaultPrefix + datetime.datetime.now().strftime("%d_%m_%Y_%H_%M_%S_")
+            if (self._bridge._filenameCurrentRunSuffix is not None) and isinstance(self._bridge._filenameCurrentRunSuffix, list) and (len(self._bridge._filenameCurrentRunSuffix) > 0):
+                newEntry['filenamecurrentrunsuffix'] = self._bridge._filenameCurrentRunSuffix.pop(0)
         else:
             newEntry['filenameprefix'] = "image"
 
@@ -330,6 +352,8 @@ class ThorBridge:
 
         self._filenameDefaultPrefix = ""
         self._filenameCurrentRunPrefix = None
+        # This is a list of new suffix - if they are present they're used for naming instead of an incrementing counter
+        self._filenameCurrentRunSuffix = [ 'test', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h' ]
 
     def _readConfigFile(self):
         cfgPath = os.path.join(Path.home(), ".config/thorbridge/bridge.conf")
@@ -380,11 +404,32 @@ class ThorBridge:
         # Update / set MQTT topics
         self._mqttHandlers = MQTTPatternMatcher()
         self._mqttHandlers.registerHandler(f"{self._configuration['mqtt']['basetopic']}trigger", [ self._mqtt_trigger ])
+        self._mqttHandlers.registerHandler(f"{self._configuration['mqtt']['basetopic']}setrun", [ self._mqtt_setrun ])
 
         return True
 
     def _mqtt_trigger(self, topic, msg):
         self._logger.debug("MQTT-REQ: Trigger")
+
+    def _mqtt_setrun(self, topic, msg):
+        self._logger.debug(f"Setting run parameters {msg}")
+
+        if msg is None:
+            return
+        if not isinstance(msg, dict):
+            return
+        if "runprefix" in msg:
+            self._filenameCurrentRunPrefix = msg["runprefix"]
+        else:
+            self._filenameCurrentRunPrefix = None
+
+        if ("runsuffix" in msg) and isinstance(msg["runsuffix"], list):
+            self._filenameCurrentRunSuffix = msg["runsuffix"]
+        else:
+            self._filenameCurrentRunSuffix = None
+
+        self._logger.debug(f"Set run prefix to {self._filenameCurrentRunPrefix}")
+        self._logger.debug(f"Set run suffix to {self._filenameCurrentRunSuffix}")
 
     def main(self):
         while True:
@@ -472,7 +517,17 @@ class ThorBridge:
             self._logger.warning(f"Failed to connect to MQTT server (code {rc})")
 
     def _mqtt_on_message(self, client, userdata, msg):
-        pass
+        self._logger.debug(f"MQTT-IN: {msg.topic}")
+
+        try:
+            msg.payload = json.loads(str(msg.payload.decode('utf-8', 'ignore')))
+        except Exception as e:
+            pass
+
+        if self._mqttHandlers is not None:
+            self._mqttHandlers.callHandlers(msg.topic, msg.payload, self._configuration['mqtt']['basetopic'])
+        else:
+            self._logger.debug(f"MQTT-IN dropping message on {msg.topic}")
 
 
 
@@ -485,68 +540,67 @@ class ThorBridge:
 
 
 class MQTTPatternMatcher:
-	def __init__(self):
-		self._handlers = []
-		self._idcounter = 0
+    def __init__(self):
+        self._handlers = []
+        self._idcounter = 0
 
-	def registerHandler(self, pattern, handler):
-		self._idcounter = self._idcounter + 1
-		self._handlers.append({ 'id' : self._idcounter, 'pattern' : pattern, 'handler' : handler })
-		return self._idcounter
+    def registerHandler(self, pattern, handler):
+        self._idcounter = self._idcounter + 1
+        self._handlers.append({ 'id' : self._idcounter, 'pattern' : pattern, 'handler' : handler })
+        return self._idcounter
 
-	def removeHandler(self, handlerId):
-		newHandlerList = []
-		for entry in self._handlers:
-			if entry['id'] == handlerId:
-				continue
-			newHandlerList.append(entry)
-		self._handlers = newHandlerList
+    def removeHandler(self, handlerId):
+        newHandlerList = []
+        for entry in self._handlers:
+            if entry['id'] == handlerId:
+                continue
+            newHandlerList.append(entry)
+        self._handlers = newHandlerList
 
-	def _checkTopicMatch(self, filter, topic):
-		filterparts = filter.split("/")
-		topicparts = topic.split("/")
+    def _checkTopicMatch(self, filter, topic):
+        print(f"Comparing filter {filter} to topic {topic}")
+        filterparts = filter.split("/")
+        topicparts = topic.split("/")
 
-		# If last part of topic or filter is empty - drop ...
-		if topicparts[-1] == "":
-			del topicparts[-1]
-		if filterparts[-1] == "":
-			del filterparts[-1]
+        # If last part of topic or filter is empty - drop ...
+        if topicparts[-1] == "":
+            del topicparts[-1]
+        if filterparts[-1] == "":
+            del filterparts[-1]
 
         # If filter is longer than topics we cannot have a match
-		if len(filterparts) > len(topicparts):
-			return False
+        if len(filterparts) > len(topicparts):
+            return False
 
         # Check all levels till we have a mistmatch or a multi level wildcard match,
         # continue scanning while we have a correct filter and no multi level match
-		for i in range(len(filterparts)):
-			if filterparts[i] == '+':
-				continue
-			if filterparts[i] == '#':
-				return True
-			if filterparts[i] != topicparts[i]:
-				return False
+        for i in range(len(filterparts)):
+            if filterparts[i] == '+':
+                continue
+            if filterparts[i] == '#':
+                return True
+            if filterparts[i] != topicparts[i]:
+                return False
 
-		if len(topicparts) != len(filterparts):
-			return False
+        if len(topicparts) != len(filterparts):
+            return False
 
-		# Topic applies
-		return True
+        # Topic applies
+        return True
 
-	def callHandlers(self, topic, message, basetopic = "", stripBaseTopic = True):
-		topic_stripped = topic
-		if basetopic != "":
-			if topic.startswith(basetopic) and stripBaseTopic:
-				topic_stripped = topic[len(basetopic):]
+    def callHandlers(self, topic, message, basetopic = "", stripBaseTopic = True):
+        topic_stripped = topic
+        if basetopic != "":
+            if topic.startswith(basetopic) and stripBaseTopic:
+                topic_stripped = topic[len(basetopic):]
 
-		for regHandler in self._handlers:
-			if self._checkTopicMatch(basetopic + regHandler['pattern'], topic):
-				if isinstance(regHandler['handler'], list):
-					for handler in regHandler['handler']:
-						handler(topic_stripped, message)
-				elif callable(regHandler['handler']):
-					regHandler['handler'](topic_stripped, message)
-
-
+        for regHandler in self._handlers:
+            if self._checkTopicMatch(regHandler['pattern'], topic):
+                if isinstance(regHandler['handler'], list):
+                    for handler in regHandler['handler']:
+                        handler(topic_stripped, message)
+                elif callable(regHandler['handler']):
+                    regHandler['handler'](topic_stripped, message)
 
 if __name__ == "__main__":
     with ThorBridge(loglevel = logging.DEBUG) as bridge:
