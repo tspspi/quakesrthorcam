@@ -405,6 +405,7 @@ class ThorBridge:
         self._mqttHandlers = MQTTPatternMatcher()
         self._mqttHandlers.registerHandler(f"{self._configuration['mqtt']['basetopic']}trigger", [ self._mqtt_trigger ])
         self._mqttHandlers.registerHandler(f"{self._configuration['mqtt']['basetopic']}setrun", [ self._mqtt_setrun ])
+        self._mqttHandlers.registerHandler(f"{self._configuration['mqtt']['basetopic']}exposure/set", [ self._mqtt_setexposure ] )
 
         return True
 
@@ -413,6 +414,10 @@ class ThorBridge:
 
     def _mqtt_setrun(self, topic, msg):
         self._logger.debug(f"Setting run parameters {msg}")
+        if not "exposure_ms" in msg:
+            self._logger.warn("Requested exposure setting but no exposure_ms specified")
+        else:
+            self.setExposure(msg['exposure_ms'])
 
         if msg is None:
             return
