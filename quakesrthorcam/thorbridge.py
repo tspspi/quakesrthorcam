@@ -209,6 +209,7 @@ class ThorCamWrapper(ThorCam):
             return
         if msg == "image":
             return
+        # if msg == ""
         self._logger.debug(f"Received unknown camera message {msg}: {value}")
 
     def got_image(self, image, count, queued_count, t):
@@ -412,12 +413,16 @@ class ThorBridge:
     def _mqtt_trigger(self, topic, msg):
         self._logger.debug("MQTT-REQ: Trigger")
 
-    def _mqtt_setrun(self, topic, msg):
-        self._logger.debug(f"Setting run parameters {msg}")
+    def _mqtt_setexposure(self, topic, msg):
         if not "exposure_ms" in msg:
+            self._logger.warn(f"Requested to set exposure but no value provided")
             self._logger.warn("Requested exposure setting but no exposure_ms specified")
         else:
+            self._logger.debug(f"Requested to set exposure to {msg['exposure_ms']}")
             self.setExposure(msg['exposure_ms'])
+
+    def _mqtt_setrun(self, topic, msg):
+        self._logger.debug(f"Setting run parameters {msg}")
 
         if msg is None:
             return
@@ -608,5 +613,11 @@ class MQTTPatternMatcher:
                     regHandler['handler'](topic_stripped, message)
 
 if __name__ == "__main__":
+    profile = False
+
     with ThorBridge(loglevel = logging.DEBUG) as bridge:
-        bridge.main()
+        if profile:
+            import cProfile
+            cProfile.run('bridge.main()', 'runstats')
+        else:
+            bridge.main()
