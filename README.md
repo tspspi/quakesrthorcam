@@ -1,5 +1,7 @@
 # QUAK/ESR ThorCam interface
 
+__Note:__ Work in progress, SCP interface currently not working
+
 This is a small Python service that runs on a Windows machine to which the
 ThorCam is attached to provide a bridge into the control system that has
 been realized on an OpenSource platform - it exposes an MQTT interface for
