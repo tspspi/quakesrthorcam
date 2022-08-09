@@ -577,7 +577,7 @@ def processingStartup(iThr, q):
     imProc = ThorImageProcessor(loglevel = logging.DEBUG)
     imProc._imageProcessingProcess(iThr, q)
 
-def mainStartup(imageProcessingThreads = 3):
+def mainStartup(imageProcessingThreads = 3, profile = False):
     multictx = mp.get_context("spawn")
     imqueue = multictx.JoinableQueue()
     improcesses = []
