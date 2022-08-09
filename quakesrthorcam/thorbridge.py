@@ -10,47 +10,13 @@ import threading
 import datetime
 import numpy as np
 
+import multiprocessing as mp
+
 import os
 from pathlib import Path
 
-class ThreadSafeQueue:
-    def __init__(self, logger = None):
-        self._logger = logger
-        self._lock = threading.Lock()
-        self.queue = []
-        self._evt = threading.Event()
-
-    def push(self, newItem):
-        with self._lock:
-            self.queue.append(newItem)
-            if self._logger:
-                self._logger.debug(f"QUEUED-NEW: {len(self.queue)}")
-        self._evt.set()
-
-    def pop(self, blocking = False, timeout = 0.1):
-        res = None
-
-        with self._lock:
-            if len(self.queue) > 0:
-                res = self.queue.pop(0)
-
-        if (res is None) and blocking:
-            while not self._evt.is_set():
-                self._evt.wait(timeout)
-
-            # Try after our thread has been released
-            with self._lock:
-                if len(self.queue) > 0:
-                    res = self.queue.pop(0)
-
-        return res
-
-
 class ThorCamWrapper(ThorCam):
-    def __init__(self, bridge = None, nThreadsFrameProcessing = 2):
-        if nThreadsFrameProcessing <= 0:
-            raise ValueError("At least one processing thread is required")
-
+    def __init__(self, bridge = None):
         self._serials = []
         if bridge is not None:
             self._logger = bridge._logger
@@ -61,65 +27,13 @@ class ThorCamWrapper(ThorCam):
             self._logger.addHandler(logging.StreamHandler())
             self._logger.setLevel(logging.DEBUG)
 
-        self._imqueue = ThreadSafeQueue(self._logger)
-        self._nThreadsFrameProcessing = nThreadsFrameProcessing
-        self._threadsFrameProcessing = []
-        self._terminateProcessThread = []
-
-        for ithr in range(nThreadsFrameProcessing):
-            self._logger.debug(f"Launching processing thread {ithr}")
-            self._terminateProcessThread.append(False)
-            self._threadsFrameProcessing.append(threading.Thread(target = self._processingThread, args = (ithr,)))
-            self._threadsFrameProcessing[len(self._threadsFrameProcessing)-1].start()
-
         self.state = 0
         self._logger.debug("Starting ThorCam process")
         self.start_cam_process()
         time.sleep(5)
         self.state = 1
 
-    def _processingThread(self, iThr):
-        # Just wait for new images being pushed into the queue (or we are getting terminated)
-        while True:
-            # ToDo: Check if we should terminate ourself ...
-
-            nextFrame = self._imqueue.pop(True)
-
-            if not nextFrame:
-                if self._terminateProcessThread[iThr]:
-                    break
-                continue
-
-            self._logger.debug(f"Processing next frame on background thread {iThr}")
-            stime = time.time() * 1000
-
-            # Do frame processing
-            newImage = self._convert_image_to_PIL(nextFrame['image'])
-
-            # Now either store to file or pass into waiting / name queue ...
-            if "filenamecurrentrunsuffix" in nextFrame:
-                destFName = nextFrame['targetpath'] + nextFrame['filenameprefix'] + "_" + str(nextFrame['filenamecurrentrunsuffix']) + nextFrame['filenamesuffix']
-            else:
-                destFName = nextFrame['targetpath'] + nextFrame['filenameprefix'] + str(nextFrame['count']) + nextFrame['filenamesuffix']
-
-            newImage.convert('RGB').save(destFName)
-
-            etime = time.time() * 1000
-            self._logger.debug(f"Processed frame on thread {iThr} (t={nextFrame['t']}) in {etime - stime} milliseconds")
-
-            # ToDo: If required SCP the frame somewhere ...
-
-        self._logger.debug("Terminating processing thread")
-
     def shutdown(self):
-        self._logger.debug("Waiting for shutdown of processing threads")
-        for i in range(len(self._threadsFrameProcessing)):
-            self._terminateProcessThread[i] = True
-        for i in range(len(self._threadsFrameProcessing)):
-            self._threadsFrameProcessing[i].join()
-            self._logger.debug(f"Thread {i} terminated and joined")
-            self._threadsFrameProcessing[i] = 0
-
         if self.cam_open:
             self._logger.debug("Closing ThorCam")
             self.close_camera()
@@ -214,9 +128,10 @@ class ThorCamWrapper(ThorCam):
 
     def got_image(self, image, count, queued_count, t):
         self._logger.debug("Received image (count: {}, queued count: {})".format(image, count, queued_count))
-        #self._write_image_to_file(image, f"c:\\temp\\image{count}.png")
+
         newEntry = {
-            'image' : image,
+            'image' : image.to_bytearray()[0],
+            'image_size' : image.get_size(),
             'count' : count,
             't' : t,
             'filenamesuffix' : '.tiff',
@@ -232,44 +147,16 @@ class ThorCamWrapper(ThorCam):
         else:
             newEntry['filenameprefix'] = "image"
 
+        if "filenamecurrentrunsuffix" in newEntry:
+            self._logger.debug(f"Enqueued encoding of image {newEntry['filenamecurrentrunsuffix']}")
+        else:
+            self._logger.debug(f"Enqueued encoding of image {newEntry['filenameprefix']}")
         # We build our base filename (that's then simply counted upwards from)
         # by using a generic (optional) prefix+timestamp OR the run prefix depending
         # on the current state of the class ... the current run prefix can be
         # set via MQTT message (for example after taking the previous pictures)
 
-        self._imqueue.push(newEntry)
-
-    def _convert_image_to_PIL(self, image):
-        data = image.to_bytearray()[0]
-
-        # Pretty inefficient reshape
-        newIm = []
-        for i in range(int(len(data) / 2)):
-            if (i % image.get_size()[0]) == 0:
-                newIm.append([])
-            pxVal = float(int(data[i*2]) * 256 + int(data[i*2+1])) / 65535.0 * 255.0
-            newIm[len(newIm)-1].append(pxVal)
-
-        image = Image.fromarray(np.asarray(newIm, dtype = np.float32), mode='F')
-        return image
-
-    def _write_image_to_file(self, image, filename):
-        print(image.get_size())
-        data = image.to_bytearray()[0]
-
-        # Pretty inefficient reshape
-        newIm = []
-        for i in range(int(len(data) / 2)):
-            if (i % image.get_size()[0]) == 0:
-                newIm.append([])
-            pxVal = float(int(data[i*2]) * 256 + int(data[i*2+1])) / 65535.0 * 255.0
-            newIm[len(newIm)-1].append(pxVal)
-
-        #image = Image.frombytes("I;16B", image.get_size(), bytes(data))
-        image = Image.fromarray(np.asarray(newIm, dtype = np.float32), mode='F')
-
-        self._logger.info(f"Storing image {filename} to disk")
-        image.convert('RGB').save(filename)
+        self._bridge._imqueue.put(newEntry)
 
     def setTrigger(self, hardware = False, frames = 1):
         if hardware and ("HW Trigger" not in self.supported_triggers):
@@ -328,6 +215,7 @@ class ThorBridge:
     def __init__(
         self,
 
+        queue = None,
         logger = None,
         loglevel = logging.WARNING
     ):
@@ -337,6 +225,8 @@ class ThorBridge:
             self._logger.addHandler(logging.StreamHandler())
         else:
             self._logger = logger
+
+        self._imqueue = queue
 
         self._terminate = False
         self._logger.setLevel(loglevel)
@@ -354,7 +244,7 @@ class ThorBridge:
         self._filenameDefaultPrefix = ""
         self._filenameCurrentRunPrefix = None
         # This is a list of new suffix - if they are present they're used for naming instead of an incrementing counter
-        self._filenameCurrentRunSuffix = [ 'test', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h' ]
+        self._filenameCurrentRunSuffix = None
 
     def _readConfigFile(self):
         cfgPath = os.path.join(Path.home(), ".config/thorbridge/bridge.conf")
@@ -438,9 +328,6 @@ class ThorBridge:
         else:
             self._filenameCurrentRunSuffix = None
 
-        self._logger.debug(f"Set run prefix to {self._filenameCurrentRunPrefix}")
-        self._logger.debug(f"Set run suffix to {self._filenameCurrentRunSuffix}")
-
     def main(self):
         while True:
             curTime = datetime.datetime.now(datetime.timezone.utc)
@@ -466,6 +353,10 @@ class ThorBridge:
                         time.sleep(15)
                     continue
 
+            # In case we have not initialized the camera module up until now - do this now ...
+            if (self._cam is None) and (self._configuration is not None):
+                self._cam = ThorCamWrapper(bridge = self)
+
             # In case we have not initialized MQTT but have configuration we have to initialize
             # the MQTT client
             if (self._mqtt is None) and (self._configuration is not None):
@@ -481,9 +372,6 @@ class ThorBridge:
                 self._mqtt.loop_start()
                 self._logger.debug("MQTT loop started")
 
-            # In case we have not initialized the camera module up until now - do this now ...
-            if (self._cam is None) and (self._configuration is not None):
-                self._cam = ThorCamWrapper(bridge = self)
 
             # Wait for anything to do on the main thread (or the heartbeat)...
             if not self._evtMainLoop.is_set():
@@ -539,6 +427,80 @@ class ThorBridge:
         else:
             self._logger.debug(f"MQTT-IN dropping message on {msg.topic}")
 
+class ThorImageProcessor:
+    def __init__(self, loglevel):
+        self._logger = logging.getLogger(__name__)
+        self._logger.addHandler(logging.StreamHandler())
+        self._logger.setLevel(loglevel)
+
+    def _imageProcessingProcess(self, iThr, q):
+        self._logger.debug(f"Process {iThr} started")
+        # Just wait for new images being pushed into the queue (or we are getting terminated)
+        while True:
+            # Blocking "get" ... either image, command or "None" to terminate ...
+            nextFrame = q.get()
+
+            if not nextFrame:
+                break
+
+            self._logger.debug(f"Processing next frame on background thread {iThr}")
+            stime = time.time() * 1000
+
+            # Do frame processing
+            newImage = self._convert_image_to_PIL(nextFrame)
+
+            # Now either store to file or pass into waiting / name queue ...
+            if "filenamecurrentrunsuffix" in nextFrame:
+                destFName = nextFrame['targetpath'] + nextFrame['filenameprefix'] + "_" + str(nextFrame['filenamecurrentrunsuffix']) + nextFrame['filenamesuffix']
+            else:
+                destFName = nextFrame['targetpath'] + nextFrame['filenameprefix'] + str(nextFrame['count']) + nextFrame['filenamesuffix']
+
+            newImage.convert('RGB').save(destFName)
+
+            etime = time.time() * 1000
+            self._logger.debug(f"Processed frame on thread {iThr} (t={nextFrame['t']}) in {etime - stime} milliseconds, stored in {destFName}")
+
+            # ToDo: If required SCP the frame somewhere ...
+
+            q.task_done()
+
+        self._logger.debug(f"Terminating processing thread {iThr}")
+        # Last task is done (for queue join)
+        q.task_done()
+
+    def _convert_image_to_PIL(self, entry):
+        #data = image.to_bytearray()[0]
+        data = entry['image']
+
+        # Pretty inefficient reshape
+        newIm = []
+        for i in range(int(len(data) / 2)):
+            if (i % entry['image_size'][0]) == 0:
+                newIm.append([])
+            pxVal = float(int(data[i*2]) * 256 + int(data[i*2+1])) / 65535.0 * 255.0
+            newIm[len(newIm)-1].append(pxVal)
+
+        image = Image.fromarray(np.asarray(newIm, dtype = np.float32), mode='F')
+        return image
+
+    def _write_image_to_file(self, image, filename):
+        print(image.get_size())
+        data = image.to_bytearray()[0]
+
+        # Pretty inefficient reshape
+        newIm = []
+        for i in range(int(len(data) / 2)):
+            if (i % image.get_size()[0]) == 0:
+                newIm.append([])
+            pxVal = float(int(data[i*2]) * 256 + int(data[i*2+1])) / 65535.0 * 255.0
+            newIm[len(newIm)-1].append(pxVal)
+
+        #image = Image.frombytes("I;16B", image.get_size(), bytes(data))
+        image = Image.fromarray(np.asarray(newIm, dtype = np.float32), mode='F')
+
+        self._logger.info(f"Storing image {filename} to disk")
+        image.convert('RGB').save(filename)
+
 
 
 
@@ -568,7 +530,6 @@ class MQTTPatternMatcher:
         self._handlers = newHandlerList
 
     def _checkTopicMatch(self, filter, topic):
-        print(f"Comparing filter {filter} to topic {topic}")
         filterparts = filter.split("/")
         topicparts = topic.split("/")
 
@@ -612,12 +573,39 @@ class MQTTPatternMatcher:
                 elif callable(regHandler['handler']):
                     regHandler['handler'](topic_stripped, message)
 
-if __name__ == "__main__":
-    profile = False
+def processingStartup(iThr, q):
+    imProc = ThorImageProcessor(loglevel = logging.DEBUG)
+    imProc._imageProcessingProcess(iThr, q)
 
-    with ThorBridge(loglevel = logging.DEBUG) as bridge:
+def mainStartup(imageProcessingThreads = 3):
+    multictx = mp.get_context("spawn")
+    imqueue = multictx.JoinableQueue()
+    improcesses = []
+
+    for ithr in range(imageProcessingThreads):
+        improcesses.append(multictx.Process(target=processingStartup, args=(ithr, imqueue)))
+        improcesses[len(improcesses)-1].start()
+    print("main startup ...")
+    # Our main program ...
+    with ThorBridge(loglevel = logging.DEBUG, queue = imqueue) as bridge:
         if profile:
             import cProfile
             cProfile.run('bridge.main()', 'runstats')
         else:
             bridge.main()
+
+    # Shutdown processes
+    for i in range(len(improcesses)):
+        imqueue.put(None)
+    for proc in improcesses:
+        proc.join()
+
+
+if __name__ == "__main__":
+    profile = False
+
+    if profile:
+        import cProfile
+        cProfile.run('mainStartup()', 'runstats')
+    else:
+        mainStartup()
