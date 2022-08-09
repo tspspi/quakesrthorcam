@@ -129,13 +129,17 @@ class ThorCamWrapper(ThorCam):
     def got_image(self, image, count, queued_count, t):
         self._logger.debug("Received image (count: {}, queued count: {})".format(image, count, queued_count))
 
+        targetpath = "c:\\temp\\"
+        if "imagedir" in self._bridge._configuration:
+            targetpath = self._bridge._configuration['imagedir']
+
         newEntry = {
             'image' : image.to_bytearray()[0],
             'image_size' : image.get_size(),
             'count' : count,
             't' : t,
             'filenamesuffix' : '.tiff',
-            'targetpath' : "c:\\temp\\"
+            'targetpath' : targetpath
         }
         if self._bridge:
             if self._bridge._filenameCurrentRunPrefix is not None:
