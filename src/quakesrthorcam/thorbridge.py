@@ -12,6 +12,8 @@ import numpy as np
 
 import multiprocessing as mp
 
+import paramiko
+
 import os
 from pathlib import Path
 
@@ -220,6 +222,7 @@ class ThorBridge:
         self,
 
         queue = None,
+        notifyqueue = None,
         logger = None,
         loglevel = logging.WARNING
     ):
@@ -231,6 +234,7 @@ class ThorBridge:
             self._logger = logger
 
         self._imqueue = queue
+        self._notifyqueue = notifyqueue
 
         self._terminate = False
         self._logger.setLevel(loglevel)
@@ -378,8 +382,21 @@ class ThorBridge:
 
 
             # Wait for anything to do on the main thread (or the heartbeat)...
+            while not self._notifyqueue.empty():
+                try:
+                    notifyObject = self._notifyqueue.get(False)
+                    self._notifyqueue.task_done()
+
+                    if notifyObject['evt'] == "stored":
+                        del notifyObject['evt']
+                        self._mqtt.publish(f"{self._configuration['mqtt']['basetopic']}raw/stored", json.dumps(notifyObject))
+                        self._logger.debug(f"Publishing storage of raw frame {notifyObject}")
+
+                    # Raise MQTT notification
+                except Exception:
+                    pass
             if not self._evtMainLoop.is_set():
-                self._evtMainLoop.wait(5)
+                self._evtMainLoop.wait(1)
 
             if self._cam is not None:
                 self._cam.periodic()
@@ -437,7 +454,23 @@ class ThorImageProcessor:
         self._logger.addHandler(logging.StreamHandler())
         self._logger.setLevel(loglevel)
 
-    def _imageProcessingProcess(self, iThr, q):
+    def _readConfiguration(self):
+        cfgPath = os.path.join(Path.home(), ".config/thorbridge/bridge.conf")
+        self._logger.debug(f"Trying to load configuration from {cfgPath}")
+        cfgContent = None
+        try:
+            with open(cfgPath) as cfgFile:
+                cfgContent = json.load(cfgFile)
+        except FileNotFoundError:
+            self._logger.warn(f"Failed to read configuration file from {cfgPath}")
+            return False
+        except JSONDecodeError as e:
+            self._logger.error(f"Failed to process configuration file {cfgPath}: {e}")
+            return False
+
+        return cfgContent
+
+    def _imageProcessingProcess(self, iThr, q, qNotify):
         self._logger.debug(f"Process {iThr} started")
         # Just wait for new images being pushed into the queue (or we are getting terminated)
         while True:
@@ -454,17 +487,54 @@ class ThorImageProcessor:
             newImage = self._convert_image_to_PIL(nextFrame)
 
             # Now either store to file or pass into waiting / name queue ...
+            destFNameNoPath = None
             if "filenamecurrentrunsuffix" in nextFrame:
                 destFName = nextFrame['targetpath'] + nextFrame['filenameprefix'] + "_" + str(nextFrame['filenamecurrentrunsuffix']) + nextFrame['filenamesuffix']
+                destFNameNoPath = nextFrame['filenameprefix'] + "_" + str(nextFrame['filenamecurrentrunsuffix']) + nextFrame['filenamesuffix']
             else:
                 destFName = nextFrame['targetpath'] + nextFrame['filenameprefix'] + str(nextFrame['count']) + nextFrame['filenamesuffix']
+                destFNameNoPath = nextFrame['targetpath'] + nextFrame['filenameprefix'] + str(nextFrame['count']) + nextFrame['filenamesuffix']
 
             newImage.convert('RGB').save(destFName)
 
             etime = time.time() * 1000
             self._logger.debug(f"Processed frame on thread {iThr} (t={nextFrame['t']}) in {etime - stime} milliseconds, stored in {destFName}")
 
-            # ToDo: If required SCP the frame somewhere ...
+            # ToDo: If required SFTP the frame somewhere (works when we are able to read current configuration) ...
+            # Since we re-read the configuration always changes take immediate effect ("cheap" compared to the encoding stuff we do)
+            cfg = self._readConfiguration()
+            if cfg:
+                if ("rawframesftp" in cfg) and isinstance(cfg["rawframesftp"], list):
+                    for dest in cfg["rawframesftp"]:
+                        if ("keyfile" not in dest) or ("host" not in dest) or ("destpath" not in dest) or ("user" not in dest):
+                            self._logger.error("Invalid upload configuration in rawframesftp")
+                        else:
+                            # We should upload the raw image frames to some remote machine ...
+                            try:
+                                stime = datetime.datetime.now(datetime.timezone.utc)
+
+                                sshKey = paramiko.RSAKey.from_private_key_file(dest["keyfile"])
+                                sshClient = paramiko.SSHClient()
+                                sshClient.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                                sshClient.connect(dest["host"], username = dest["user"], pkey = sshKey)
+                                sftpClient = sshClient.open_sftp()
+                                self._logger.debug(f"Uploading {destFNameNoPath} to {dest['host']}")
+                                sftpClient.put(destFName, dest["destpath"] + destFNameNoPath)
+                                sftpClient.close()
+                                sshClient.close()
+
+                                etime = datetime.datetime.now(datetime.timezone.utc)
+                                self._logger.debug(f"DONE Uploading {destFNameNoPath} to {dest['host']} in {(etime - stime).total_seconds()} seconds")
+                            except Exceptio as e:
+                                logger.error("Upload failed: {e}")
+
+            newNotifyEvent = {
+                'evt' : 'stored',
+                'imagefilename' : destFNameNoPath,
+                'localfilename' : destFName
+            }
+
+            qNotify.put(newNotifyEvent)
 
             q.task_done()
 
@@ -577,21 +647,22 @@ class MQTTPatternMatcher:
                 elif callable(regHandler['handler']):
                     regHandler['handler'](topic_stripped, message)
 
-def processingStartup(iThr, q):
+def processingStartup(iThr, q, qNotify):
     imProc = ThorImageProcessor(loglevel = logging.DEBUG)
-    imProc._imageProcessingProcess(iThr, q)
+    imProc._imageProcessingProcess(iThr, q, qNotify)
 
 def mainStartup(imageProcessingThreads = 3, profile = False):
     multictx = mp.get_context("spawn")
     imqueue = multictx.JoinableQueue()
+    queueDone = multictx.JoinableQueue()
     improcesses = []
 
     for ithr in range(imageProcessingThreads):
-        improcesses.append(multictx.Process(target=processingStartup, args=(ithr, imqueue)))
+        improcesses.append(multictx.Process(target=processingStartup, args=(ithr, imqueue, queueDone)))
         improcesses[len(improcesses)-1].start()
     print("main startup ...")
     # Our main program ...
-    with ThorBridge(loglevel = logging.DEBUG, queue = imqueue) as bridge:
+    with ThorBridge(loglevel = logging.DEBUG, queue = imqueue, notifyqueue = queueDone) as bridge:
         if profile:
             import cProfile
             cProfile.run('bridge.main()', 'runstats')
