@@ -559,25 +559,6 @@ class ThorImageProcessor:
         image = Image.fromarray(np.asarray(newIm, dtype = np.float32), mode='F')
         return image
 
-    def _write_image_to_file(self, image, filename):
-        print(image.get_size())
-        data = image.to_bytearray()[0]
-
-        # Pretty inefficient reshape
-        newIm = []
-        for i in range(int(len(data) / 2)):
-            if (i % image.get_size()[0]) == 0:
-                newIm.append([])
-            pxVal = float(int(data[i*2]) * 256 + int(data[i*2+1])) / 65535.0 * 255.0
-            newIm[len(newIm)-1].append(pxVal)
-
-        #image = Image.frombytes("I;16B", image.get_size(), bytes(data))
-        image = Image.fromarray(np.asarray(newIm, dtype = np.float32), mode='F')
-
-        self._logger.info(f"Storing image {filename} to disk")
-        image.convert('RGB').save(filename)
-
-
 
 
 
