@@ -485,6 +485,7 @@ class ThorImageProcessor:
 
             # Do frame processing
             newImage = self._convert_image_to_PIL(nextFrame)
+            self._logger.debug(f"Format of image: {newImage.format}, mode: {newImage.mode}")
 
             # Now either store to file or pass into waiting / name queue ...
             destFNameNoPath = None
@@ -495,7 +496,8 @@ class ThorImageProcessor:
                 destFName = nextFrame['targetpath'] + nextFrame['filenameprefix'] + str(nextFrame['count']) + nextFrame['filenamesuffix']
                 destFNameNoPath = nextFrame['targetpath'] + nextFrame['filenameprefix'] + str(nextFrame['count']) + nextFrame['filenamesuffix']
 
-            newImage.convert('RGB').save(destFName)
+            # newImage.convert('F').save(destFName)
+            newImage.save(destFName)
 
             etime = time.time() * 1000
             self._logger.debug(f"Processed frame on thread {iThr} (t={nextFrame['t']}) in {etime - stime} milliseconds, stored in {destFName}")
