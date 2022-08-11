@@ -15,8 +15,10 @@ from pathlib import Path
 
 import paramiko
 
+import pyopencl as cl
+
 class BeamfinderWorker:
-    def __init__(self, ithr, jobQueue):
+    def __init__(self, ithr, jobQueue, useOpenCL = False):
         self._logger = logging.getLogger(__name__)
         self._logger.addHandler(logging.StreamHandler())
         self._logger.setLevel(logging.DEBUG)
@@ -24,6 +26,74 @@ class BeamfinderWorker:
         self._ithr = ithr
         self._jobQueue = jobQueue
         self._readConfigFile()
+
+        self._useOpenCL = useOpenCL
+        self._oclDevice = None
+        self._oclPlatform = None
+        while True:
+            if useOpenCL:
+                clPlatformName = None
+                clDeviceName = None
+
+                platform = None
+
+                if "opencl" in self._configuration:
+                    if "platform" in self._configuration["opencl"]:
+                        clPlatformName = self._configuration["opencl"]["platform"]
+                    if "device" in self._configuration["opencl"]:
+                        clDeviceName = self._configuration["opencl"]["device"]
+
+                # First query our platform (CPU / GPU)
+                platforms = cl.get_platforms()
+                if len(platforms) < 1:
+                    self._logger.debug("No OpenCL platform available")
+                    self._useOpenCL = False
+                    break
+                if clPlatformName is None:
+                    platform = platforms[0]
+                    self._logger.debug(f"No OpenCL platform specified, using {platform.name}")
+                else:
+                    for plat in platforms:
+                        if plat.name == clPlatformName:
+                            platform = plat
+                            break
+                    if platform is None:
+                        self._logger.debug(f"Configured OpenCL platform {clPlatformName} not found")
+                        self._useOpenCL = False
+                        break
+
+                # Then query the device ...
+                devices = platform.get_devices()
+                if len(devices) < 1:
+                    self._logger.debug(f"No OpenCL device on platform {platform.name}")
+                    self._useOpenCL = False
+                    break
+                if clDeviceName is None:
+                    device = devices[0]
+                    self._logger.debug(f"No OpenCL device specified, using {device.name}")
+                else:
+                    for dev in devices:
+                        if dev.name == clDeviceName:
+                            device = dev
+                            break
+                    if device is None:
+                        self._logger.debug(f"Configured OpenCL device {clDeviceName} not found")
+                        self._useOpenCL = False
+                        break
+
+                # Initialize OpenCL context and command queue ...
+                context = cl.Context([device])
+                clqueue = cl.CommandQueue(context, device)
+
+                self._oclDevice = device
+                self._oclPlatform = platform
+                self._oclContext = context
+                self._oclCQueue = clqueue
+
+                self._logger.debug(f"Initialized context on platform {self._oclPlatform.name}: {self._oclDevice.name}")
+
+                # Leave the while loop we use for flow control
+                break
 
     def _readConfigFile(self):
         # Every process has to read by himself ...
@@ -75,6 +145,19 @@ class BeamfinderWorker:
                 return None
         else:
             im = Image.open(msg['localfilename'])
+
+        self._logger.debug(f"Loaded image with {len(im.getbands())} bands, {im.size[0]} x {im.size[1]} pixels large")
+
+        if not self._useOpenCL:
+            return im, im.size[0], im.size[1]
+        else:
+            # Load image into read only buffer (or read/write buffer) and return both ...
+            imNp = np.array(im)
+            self._logger.debug(f"Datatype in np array: {imNp.dtype}")
+            imBuffer = cl.image_from_array(self._oclContext, imNp, len(im.getbands()), mode = 'r')
+            self._logger.debug(f"Created OpenCL buffer for image {msg['imagefilename']}")
+
+            return im, im.size[0], im.size[1], imBuffer
 
     def __enter__(self):
         return self
@@ -283,7 +366,7 @@ class MQTTPatternMatcher:
 # Startup methods just bootstrap objects
 
 def processingStartup(ithr, jobQueue):
-    with BeamfinderWorker(ithr, jobQueue) as worker:
+    with BeamfinderWorker(ithr, jobQueue, useOpenCL = True) as worker:
         worker.run()
 
 def mainStartup(nProcesses = 1):
