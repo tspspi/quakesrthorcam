@@ -19,6 +19,7 @@ import pyopencl as cl
 
 class BeamfinderWorker:
     def __init__(self, ithr, jobQueue, useOpenCL = False):
+        self._frameOperations = [ self.op_testFrameOperation ]
         self._logger = logging.getLogger(__name__)
         self._logger.addHandler(logging.StreamHandler())
         self._logger.setLevel(logging.DEBUG)
@@ -92,8 +93,45 @@ class BeamfinderWorker:
 
                 self._logger.debug(f"Initialized context on platform {self._oclPlatform.name}: {self._oclDevice.name}")
 
+                self.clKernels = {
+                    'threshold' : {
+                        'name' : "Thresholding",
+                        'source' : '''//CL//
+                            __kernel void threshold(
+                                read_only image2d_t src,
+                                write_only image2d_t dest,
+                                float threshold
+                            ) {
+                                const sampler_t sampler = CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP_TO_EDGE | CLK_FILTER_NEAREST;
+                                int2 pos = (int2)(get_global_id(0), get_global_id(1));
+                                float4 pix = read_imagef(src, sampler, pos);
+
+                                if(pix.s0 < threshold) {
+                                    pix.s0 = 0;
+                                }
+
+                                write_imagef(dest, pos, pix);
+                            }'''
+                    },
+                }
+
+                # Compile kernels ...
+                self._logger.debug("Starting to compile OpenCL kernels")
+                for krn in self.clKernels:
+                    self._logger.debug(f"Compiling {self.clKernels[krn]['name']}")
+                    self.clKernels[krn]['program'] = cl.Program(self._oclContext, self.clKernels[krn]['source']).build().threshold
+                self._logger.debug("Done compiling OpenCL kernels")
+
                 # Leave the while loop we use for flow control
                 break
+
+    def op_testFrameOperation(self, image = None, height = None, width = None, clImage = None):
+        self._logger.debug("Called processing operation ...")
+        pass
+
+    def op_ThresholdImage(self, image = None, height = None, width = None, clImage = None):
+
+
 
     def _readConfigFile(self):
         # Every process has to read by himself ...
@@ -165,7 +203,14 @@ class BeamfinderWorker:
         pass
 
     def _process_got_frame(self, workItem):
-        im = self.getFrame(workItem)
+        if self._useOpenCL:
+            im, h, w, clIm = self.getFrame(workItem)
+            for op in self._frameOperations:
+                op(image = im, height = h, width = w, clImage = clIm)
+        else:
+            im, h, w = self.getFrame(workItem)
+            for op in self._frameOperations:
+                op(image = im, height = h, width = w)
         if im is None:
             return
 
