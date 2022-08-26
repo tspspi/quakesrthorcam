@@ -147,7 +147,7 @@ class ThorCamWrapper(ThorCam):
             if self._bridge._filenameCurrentRunPrefix is not None:
                 newEntry['filenameprefix'] = self._bridge._filenameCurrentRunPrefix
             else:
-                newEntry['filenameprefix'] = self._bridge._filenameDefaultPrefix + datetime.datetime.now().strftime("%d_%m_%Y_%H_%M_%S_")
+                newEntry['filenameprefix'] = self._bridge._filenameDefaultPrefix + datetime.datetime.now().strftime("%Y-%m-%d_%H_%M_%S_")
             if (self._bridge._filenameCurrentRunSuffix is not None) and isinstance(self._bridge._filenameCurrentRunSuffix, list) and (len(self._bridge._filenameCurrentRunSuffix) > 0):
                 newEntry['filenamecurrentrunsuffix'] = self._bridge._filenameCurrentRunSuffix.pop(0)
         else:
@@ -494,7 +494,7 @@ class ThorImageProcessor:
                 destFNameNoPath = nextFrame['filenameprefix'] + "_" + str(nextFrame['filenamecurrentrunsuffix']) + nextFrame['filenamesuffix']
             else:
                 destFName = nextFrame['targetpath'] + nextFrame['filenameprefix'] + str(nextFrame['count']) + nextFrame['filenamesuffix']
-                destFNameNoPath = nextFrame['targetpath'] + nextFrame['filenameprefix'] + str(nextFrame['count']) + nextFrame['filenamesuffix']
+                destFNameNoPath = nextFrame['filenameprefix'] + str(nextFrame['count']) + nextFrame['filenamesuffix']
 
             # newImage.convert('F').save(destFName)
             newImage.save(destFName)
