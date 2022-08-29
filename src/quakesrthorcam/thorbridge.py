@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 
 class ThorCamWrapper(ThorCam):
-    def __init__(self, bridge = None):
+    def __init__(self, bridge = None, notifyqueue = None):
         self._serials = []
         if bridge is not None:
             self._logger = bridge._logger
@@ -29,6 +29,7 @@ class ThorCamWrapper(ThorCam):
             self._logger.addHandler(logging.StreamHandler())
             self._logger.setLevel(logging.DEBUG)
 
+        self._notifyqueue = notifyqueue
         self.state = 0
         self._logger.debug("Starting ThorCam process")
         self.start_cam_process()
@@ -125,6 +126,12 @@ class ThorCamWrapper(ThorCam):
             return
         if msg == "image":
             return
+        if msg == "playing":
+            evtObject = {
+                'evt' : 'playing',
+                'playing' : value
+            }
+            self._notifyqueue.put(evtObject)
         # if msg == ""
         self._logger.debug(f"Received unknown camera message {msg}: {value}")
 
@@ -363,7 +370,7 @@ class ThorBridge:
 
             # In case we have not initialized the camera module up until now - do this now ...
             if (self._cam is None) and (self._configuration is not None):
-                self._cam = ThorCamWrapper(bridge = self)
+                self._cam = ThorCamWrapper(bridge = self, notifyqueue = self._notifyqueue)
 
             # In case we have not initialized MQTT but have configuration we have to initialize
             # the MQTT client
@@ -391,7 +398,10 @@ class ThorBridge:
                         del notifyObject['evt']
                         self._mqtt.publish(f"{self._configuration['mqtt']['basetopic']}raw/stored", json.dumps(notifyObject))
                         self._logger.debug(f"Publishing storage of raw frame {notifyObject}")
-
+                    if notifyObject['evt'] == "playing":
+                        del notifyObject['evt']
+                        self._mqtt.publish(f"{self._configuration['mqtt']['basetopic']}status/playing", json.dumps(notifyObject))
+                        self._logger.debug(f"Publishing playing event: {notifyObject}")
                     # Raise MQTT notification
                 except Exception:
                     pass
