@@ -317,7 +317,7 @@ class ThorBridge:
             self._logger.warn("Requested exposure setting but no exposure_ms specified")
         else:
             self._logger.debug(f"Requested to set exposure to {msg['exposure_ms']}")
-            self.setExposure(msg['exposure_ms'])
+            self._cam.setExposure(msg['exposure_ms'])
 
     def _mqtt_setrun(self, topic, msg):
         self._logger.debug(f"Setting run parameters {msg}")
