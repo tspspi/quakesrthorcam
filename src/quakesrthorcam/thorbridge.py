@@ -538,7 +538,7 @@ class ThorImageProcessor:
                                 etime = datetime.datetime.now(datetime.timezone.utc)
                                 self._logger.debug(f"DONE Uploading {destFNameNoPath} to {dest['host']} in {(etime - stime).total_seconds()} seconds")
                             except Exception as e:
-                                logger.error("Upload failed: {e}")
+                                self._logger.error("Upload failed: {e}")
 
             newNotifyEvent = {
                 'evt' : 'stored',
