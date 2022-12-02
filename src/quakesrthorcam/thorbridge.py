@@ -114,7 +114,10 @@ class ThorCamWrapper(ThorCam):
                 if (self._bridge._configuration['thorcam']['exposure'] < self.exposure_range[0]) or (self._bridge._configuration['thorcam']['exposure'] > self.exposure_range[1]):
                     self._logger.error("Requested exposure range from configuration file is out of range {}:{}".format(self.exposure_range[0], self.exposure_range[1]))
                 else:
-                    self.set_setting("exposure_ms", self._bridge._configuration['thorcam']['exposure'])
+                    try:
+                        self.set_setting("exposure_ms", self._bridge._configuration['thorcam']['exposure'])
+                    except:
+                        self._logger.error("Setting exposure failed, ignoring")
 
             self.state = 3
             self._logger.debug(f"Supported trigger types: {self.supported_triggers}")
@@ -203,7 +206,10 @@ class ThorCamWrapper(ThorCam):
 
     def setExposure(self, exposureMillisecs):
         # Raise value error if we have an invalid exposure value
-        exposureMillisecs = int(exposureMillisecs)
+        try:
+            exposureMillisecs = int(exposureMillisecs)
+        except:
+            raise ValueError("Exposure has to be an integer number")
         if exposureMillisecs < 0:
             raise ValueError("Exposure duration has to be positive")
         if (exposureMillisecs < self.exposure_range[0]) or (exposureMillisecs > self.exposure_range[1]):
@@ -324,7 +330,10 @@ class ThorBridge:
             self._logger.warn("Requested exposure setting but no exposure_ms specified")
         else:
             self._logger.debug(f"Requested to set exposure to {msg['exposure_ms']}")
-            self._cam.setExposure(msg['exposure_ms'])
+            try:
+                self._cam.setExposure(msg['exposure_ms'])
+            except:
+                self._logger.warn("Exception has been raised during set exposure, ignoring")
 
     def _mqtt_setrun(self, topic, msg):
         self._logger.debug(f"Setting run parameters {msg}")
